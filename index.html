@@ -165,9 +165,6 @@
     </script>
     
     <script type="module">
-        window.addEventListener("load", () => {
-    init();
-});
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
     import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -399,4 +396,245 @@
 
             // Excluir la zona central (esfera de exclusión)
             const distFromCenter = Math.sqrt(x * x + y * y + z * z);
-            if (dist
+            if (distFromCenter < haloConfig.minDistFromCenter) continue;
+
+            // Densidad decreciente hacia los bordes: bias hacia el interior
+            // usando una distribución radial cúbica (más denso en el centro)
+            // Aceptar con probabilidad proporcional a (1 - r_norm)^1.5
+            const rNorm = distFromCenter / Math.max(haloConfig.radiusXZ, haloConfig.radiusY);
+            if (Math.random() > Math.pow(1.0 - rNorm * 0.7, 1.2)) continue;
+
+            positions.set([x, y, z], filled * 3);
+
+            // Colores: misma paleta rosa/roja que el núcleo
+            const hue = 0.88 + Math.random() * 0.18;
+            const saturation = 0.6 + Math.random() * 0.4;
+            const lightness = 0.45 + Math.random() * 0.45;
+            color.setHSL(hue % 1, saturation, lightness);
+            colors.set([color.r, color.g, color.b], filled * 3);
+
+            filled++;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        // Partículas del halo ligeramente más pequeñas y menos opacas
+        // para dar sensación de profundidad sin tapar el disco central
+        const material = new THREE.PointsMaterial({
+            size: haloConfig.size,
+            blending: THREE.AdditiveBlending,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.65
+        });
+
+        galaxyGroup.add(new THREE.Points(geometry, material));
+    }
+
+    // ================== ELEMENTOS DE AMOR ==================
+    function createLoveElements() {
+        const textConfig = CONFIG.particles.texts;
+        const imageConfig = CONFIG.particles.images;
+        const textureLoader = new THREE.TextureLoader();
+
+        for (let i = 0; i < textConfig.count; i++) {
+            const colorData = textConfig.colors[i % textConfig.colors.length];
+            const texture = createTextTexture(textConfig.content[i % textConfig.content.length], colorData);
+            const material = new THREE.MeshPhongMaterial({ map: texture, transparent: true, alphaTest: 0.1, emissive: colorData.fill, emissiveIntensity: 1.2 });
+            const textMesh = new THREE.Mesh(new THREE.PlaneGeometry(textConfig.width, textConfig.height), material);
+            setElementOrbitPosition(textMesh, textConfig.minRadius, textConfig.maxRadius);
+            galaxyGroup.add(textMesh); loveTexts.push(textMesh);
+        }
+
+        for (let i = 0; i < imageConfig.count; i++) {
+            const imageUrl = imageConfig.urls[i % imageConfig.urls.length];
+            textureLoader.load(imageUrl, (texture) => {
+                const aspect = texture.image.width / texture.image.height;
+                const w = aspect > 1 ? imageConfig.size : imageConfig.size * aspect;
+                const h = aspect > 1 ? imageConfig.size / aspect : imageConfig.size;
+                
+                const roundedTexture = createRoundedImageTexture(texture);
+                const material = new THREE.MeshBasicMaterial({
+                    map: roundedTexture,
+                    transparent: true,
+                    alphaTest: 0.1,
+                    color: 0xBBBBBB
+                });
+
+                const imageMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
+                setElementOrbitPosition(imageMesh, imageConfig.minRadius, imageConfig.maxRadius);
+                galaxyGroup.add(imageMesh); loveImages.push(imageMesh);
+            });
+        }
+    }
+
+    function createBackgroundStars() {
+        const bgConfig = CONFIG.particles.backgroundStars;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(bgConfig.count * 3);
+        for (let i = 0; i < bgConfig.count; i++) {
+            const r = bgConfig.radius;
+            positions.set([(Math.random() - 0.5) * 2 * r, (Math.random() - 0.5) * 2 * r, (Math.random() - 0.5) * 2 * r], i * 3);
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const material = new THREE.PointsMaterial({ size: bgConfig.size, color: 0xffffff, transparent: true, opacity: 0.5 });
+        scene.add(new THREE.Points(geometry, material));
+    }
+    
+    function createShootingStar() {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0,0,0]), 3));
+        const material = new THREE.PointsMaterial({ color: 0xffffff, size: 1.8, blending: THREE.AdditiveBlending, transparent: true });
+        const star = new THREE.Points(geometry, material);
+
+        const [x, y, z] = [ THREE.MathUtils.randFloatSpread(800), THREE.MathUtils.randFloat(100, 300), THREE.MathUtils.randFloatSpread(800) ];
+        star.position.set(x, y, z);
+        
+        star.userData.velocity = new THREE.Vector3(
+            (Math.random() < 0.5 ? -1 : 1) * CONFIG.shootingStars.speed,
+            -CONFIG.shootingStars.speed * 0.5,
+            (Math.random() - 0.5) * 2
+        );
+        star.userData.life = 0;
+
+        shootingStars.push(star);
+        scene.add(star);
+    }
+
+    function setElementOrbitPosition(element, minRadius, maxRadius) {
+        const safeMinRadius = minRadius || CONFIG.elementExclusionRadius;
+        const safeMaxRadius = maxRadius || CONFIG.particles.coreStars.radius;
+        const minSeparation = 18; const maxAttempts = 50;
+        let validPosition = false; let attempts = 0;
+        let finalPosition = { x: 0, y: 0, z: 0 };
+        while (!validPosition && attempts < maxAttempts) {
+            attempts++;
+            const radius = safeMinRadius + Math.random() * (safeMaxRadius - safeMinRadius);
+            const theta = Math.random() * Math.PI * 2;
+            const maxVerticalOffset = 15;
+            const y = (Math.random() - 0.5) * maxVerticalOffset;
+            const x = radius * Math.cos(theta); const z = radius * Math.sin(theta);
+            validPosition = true;
+            for (let pos of occupiedPositions) {
+                const distance = Math.sqrt(Math.pow(x - pos.x, 2) + Math.pow(y - pos.y, 2) + Math.pow(z - pos.z, 2));
+                if (distance < minSeparation) { validPosition = false; break; }
+            }
+            if (validPosition) finalPosition = { x, y, z };
+        }
+        element.position.set(finalPosition.x, finalPosition.y, finalPosition.z);
+        occupiedPositions.push(finalPosition);
+    }
+    
+    function createTextTexture(text, color) {
+        const canvas = document.createElement('canvas'); canvas.width = 1536; canvas.height = 512;
+        const context = canvas.getContext('2d');
+        context.font = '84px "Indie Flower", cursive'; context.fillStyle = color.fill;
+        context.textAlign = 'center'; context.textBaseline = 'middle';
+        context.shadowColor = color.shadow; context.shadowBlur = 10;
+        const words = text.split(' '); let lines = []; let currentLine = words[0];
+        const maxWidth = canvas.width - 100, lineHeight = 100;
+        for (let i = 1; i < words.length; i++) {
+            const testLine = currentLine + ' ' + words[i];
+            if (context.measureText(testLine).width > maxWidth && currentLine.length > 0) { lines.push(currentLine); currentLine = words[i]; }
+            else { currentLine = testLine; }
+        }
+        lines.push(currentLine);
+        const startY = canvas.height / 2 - (lines.length - 1) * lineHeight / 2;
+        lines.forEach((line, index) => context.fillText(line, canvas.width / 2, startY + index * lineHeight));
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    function createRoundedImageTexture(texture) {
+        const img = texture.image; const maxSize = 512;
+        const w = (img.width > img.height) ? maxSize : (img.width / img.height) * maxSize;
+        const h = (img.width > img.height) ? (img.height / img.width) * maxSize : maxSize;
+        const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+        
+        const r = Math.min(w, h) * 0.1;
+        ctx.clearRect(0, 0, w, h);
+        ctx.beginPath(); ctx.moveTo(r, 0); ctx.lineTo(w - r, 0); ctx.quadraticCurveTo(w, 0, w, r);
+        ctx.lineTo(w, h - r); ctx.quadraticCurveTo(w, h, w - r, h); ctx.lineTo(r, h);
+        ctx.quadraticCurveTo(0, h, 0, h - r); ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+        ctx.closePath(); ctx.clip();
+        ctx.drawImage(img, 0, 0, w, h);
+
+        const newTexture = new THREE.CanvasTexture(canvas);
+        newTexture.colorSpace = THREE.SRGBColorSpace; newTexture.generateMipmaps = false;
+        newTexture.minFilter = THREE.LinearFilter; newTexture.magFilter = THREE.LinearFilter;
+        return newTexture;
+    }
+
+    function onWindowResize() {
+        const width = window.innerWidth, height = window.innerHeight;
+        renderer.setSize(width, height);
+        composer.setSize(width, height);
+        camera.aspect = width / height;
+        camera.position.set(0, 35, width < 768 ? 150 : 120);
+        camera.updateProjectionMatrix();
+    }
+
+    function onCanvasClick(event) {
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(loveImages);
+        if (intersects.length > 0) {
+            showLoveCard();
+        }
+    }
+
+    function showLoveCard() {
+        const overlay = document.getElementById('love-card-overlay');
+        const card = document.getElementById('love-card');
+        const text = document.getElementById('love-card-text');
+        const cardConfig = CONFIG.loveCards;
+        card.style.backgroundImage = `url('${cardConfig.images[currentCardIndex]}')`;
+        text.textContent = cardConfig.phrases[currentCardIndex];
+        overlay.style.display = 'flex';
+        currentCardIndex = (currentCardIndex + 1) % cardConfig.images.length;
+    }
+
+    function hideLoveCard() {
+        document.getElementById('love-card-overlay').style.display = 'none';
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const elapsedTime = clock.getElapsedTime();
+        galaxyGroup.rotation.y = elapsedTime * CONFIG.galaxy.rotationSpeed;
+        if (sphereMaterial) sphereMaterial.uniforms.uTime.value = elapsedTime;
+        
+        loveTexts.forEach(t => t.lookAt(camera.position));
+        loveImages.forEach(i => i.lookAt(camera.position));
+        
+        if (CONFIG.shootingStars.enabled && Math.random() < CONFIG.shootingStars.spawnProbability) {
+            createShootingStar();
+        }
+        
+        shootingStars.forEach((star, index) => {
+            star.position.add(star.userData.velocity);
+            star.userData.life++;
+            if (star.userData.life > 300) {
+                scene.remove(star);
+                shootingStars.splice(index, 1);
+            }
+        });
+        
+        controls.update();
+        composer.render();
+    }
+    
+    init();
+
+    document.getElementById('start-button-image').addEventListener('click', () => {
+        document.getElementById('start-screen').style.display = 'none';
+        document.getElementById('background-music').play().catch(e => console.error("Error al reproducir música:", e));
+    });
+
+    document.getElementById('love-card-overlay').addEventListener('click', hideLoveCard);
+    </script>
+</body>
+</html>
